@@ -1,80 +1,69 @@
-# ============================================================================
-# FIXED config.py - WITH AUTO-CALIBRATION AND GRAPH SETTINGS
-# ============================================================================
-"""
-FIXED Configuration - Now removes face and tracks hand only!
-"""
+# config file
 
-# IP Webcam settings
-USE_IP_WEBCAM = True
-IP_WEBCAM_URL = "http://10.45.83.111:8080/video"
-REGULAR_WEBCAM_INDEX = 0
+# webcam stuff change it to false for regular webcam
+use_ip = True
+url = "http://10.45.83.111:8080/video"  # e.g., "http://
+cam_id = 0
 
-# Camera settings
-FRAME_WIDTH = 640
-FRAME_HEIGHT = 480
+# screen size
+width = 640
+height = 480
 
-# HSV ranges (Default - will be overwritten by Auto-Calibration)
-HSV_LOWER = [0, 30, 40]
-HSV_UPPER = [30, 255, 255]
+# color range
+lower_color = [0, 30, 40]
+upper_color = [30, 255, 255]
 
-# YCrCb - DISABLED by default
-YCRCB_LOWER = [0, 133, 77]
-YCRCB_UPPER = [255, 173, 127]
-USE_YCRCB = False
+# extra color stuff (not used)
+ycrcb_min = [0, 133, 77]
+ycrcb_max = [255, 173, 127]
+use_ycrcb = False
 
-# Morphology
-MORPH_KERNEL_SIZE = 7
-MORPH_ITERATIONS = 2
+# image processing
+k_size = 7
+iters = 2
+min_area = 2000
 
-# Contour filtering
-MIN_CONTOUR_AREA = 2000
+# distances
+safe = 200
+warn = 100
+danger = 70
 
-# Distance thresholds
-SAFE_PX = 200      # > 200px = SAFE
-WARNING_PX = 100   # 100-200px = WARNING
-DANGER_PX = 70     # < 70px = DANGER
+# blink speed
+blink_rate = 4
 
-# Visual
-BLINK_FPS = 4
+# settings
+bg_sub = False
+threaded = True
+face_detect = True
+remove_face = False
+face_h = 100
 
-# Performance
-USE_BACKGROUND_SUBTRACTOR = False
-USE_THREADED_CAPTURE = True
+# roi
+use_roi = True
+roi_l = 0.3
+roi_r = 1.0
+roi_t = 0.0
+roi_b = 1.0
 
-# FACE REMOVAL
-ENABLE_FACE_DETECTION = True
-REMOVE_FACE_REGION = False
-FACE_REGION_HEIGHT = 100
+# circle size
+radius = 100
 
-# HAND ROI
-USE_HAND_ROI = True
-HAND_ROI_LEFT = 0.3
-HAND_ROI_RIGHT = 1.0
-HAND_ROI_TOP = 0.0
-HAND_ROI_BOTTOM = 1.0
+# smooth factor
+smooth = 0.6
 
-# Virtual object
-VIRTUAL_OBJECT_RADIUS = 100
+# blur
+blur_k = 7
 
-# Smoothing
-DISTANCE_SMOOTHING = 0.6
+# debug
+debug = True
 
-# Gaussian blur
-GAUSSIAN_BLUR_KERNEL = 7
+# graph
+show_graph = True
+g_height = 100
+g_color = (0, 255, 255)
+g_bg = (50, 50, 50)
+g_max = 400
 
-# Debug
-SHOW_DEBUG_INFO = True
-
-# --- NEW FEATURES ---
-
-# Live Graph Settings
-SHOW_GRAPH = True
-GRAPH_HEIGHT = 100  # Height in pixels
-GRAPH_COLOR = (0, 255, 255)  # Yellow
-GRAPH_BG_COLOR = (50, 50, 50)  # Dark Gray
-GRAPH_MAX_VAL = 400  # Max distance to plot (y-axis scale)
-
-# Auto-Calibration Settings
-CALIB_BOX_SIZE = 150  # Size of the box in center of screen
-CALIB_DURATION = 3.0  # Seconds to hold hand
+# calibration
+box_size = 150
+calib_time = 3.0

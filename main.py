@@ -1,244 +1,212 @@
-"""
-FIXED main application with Auto-Calibration and Rolling Graph
-"""
 import cv2
 import time
 import numpy as np
-import json
-import os
+import config as c
+from hand_detector import Detector
+import utils as u
+import distance_utils as du
 
-# Import config and modules
-import config
-from hand_detector import HandDetector
-# Import helpers including new RollingGraph
-from utils import draw_text_center, draw_fps, get_state_color, IPWebcamStream, WebcamVideoStream, RollingGraph
-from distance_utils import load_calibration, save_calibration, compute_focal_length
-
-class HandTrackingApp:
-    """Fixed hand tracking application with smart features."""
-    
+class App:
     def __init__(self):
-        """Initialize."""
-        self.detector = HandDetector(config)
+        self.d = Detector()
         
-        print(f"\n{'='*60}")
-        print("HAND TRACKING - PROTOTYPE v2.0")
-        print(f"{'='*60}\n")
+        print("starting...")
         
-        # Initialize camera
-        print("Initializing camera...")
-        if config.USE_IP_WEBCAM:
-            print(f"Using IP Webcam: {config.IP_WEBCAM_URL}")
-            if config.USE_THREADED_CAPTURE:
-                self.camera = IPWebcamStream(config.IP_WEBCAM_URL).start()
-                time.sleep(2.0)
+        if c.use_ip:
+            print("trying ip cam: " + c.url)
+            if c.threaded:
+                self.cap = u.IPStream(c.url).start()
+                time.sleep(2)
             else:
-                self.camera = cv2.VideoCapture(config.IP_WEBCAM_URL)
-                self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                self.cap = cv2.VideoCapture(c.url)
         else:
-            print(f"Using webcam: {config.REGULAR_WEBCAM_INDEX}")
-            if config.USE_THREADED_CAPTURE:
-                self.camera = WebcamVideoStream(src=config.REGULAR_WEBCAM_INDEX, width=config.FRAME_WIDTH, height=config.FRAME_HEIGHT).start()
-                time.sleep(1.0)
+            print("using webcam")
+            if c.threaded:
+                self.cap = u.WebCam(c.cam_id, c.width, c.height).start()
+                time.sleep(1)
             else:
-                self.camera = cv2.VideoCapture(config.REGULAR_WEBCAM_INDEX)
-                self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, config.FRAME_WIDTH)
-                self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, config.FRAME_HEIGHT)
+                self.cap = cv2.VideoCapture(c.cam_id)
         
-        # Test frame
-        ret, test_frame = self.read_frame()
-        if not ret or test_frame is None:
-            raise RuntimeError("Failed to read from camera!")
+        ret, frame = self.get_frame()
+        if not ret:
+            print("cam error")
+            return
+            
+        print(f"cam size: {frame.shape[1]}x{frame.shape[0]}")
         
-        print(f"✓ Camera OK: {test_frame.shape[1]}x{test_frame.shape[0]}")
-        
-        # Virtual object
-        frame_height, frame_width = test_frame.shape[:2]
-        self.object_shape = {
+        h, w = frame.shape[:2]
+        self.obj = {
             'type': 'circle',
-            'center': (frame_width // 2, frame_height // 2),
-            'radius': config.VIRTUAL_OBJECT_RADIUS
+            'center': (w // 2, h // 2),
+            'r': c.radius
         }
         
-        # Initialize Rolling Graph
-        self.graph = RollingGraph(
-            width=frame_width, 
-            height=config.GRAPH_HEIGHT, 
-            max_val=config.GRAPH_MAX_VAL,
-            color=config.GRAPH_COLOR,
-            bg_color=config.GRAPH_BG_COLOR
+        # graph stuff
+        self.g = u.Graph(w, c.g_height, c.g_max, c.g_color, c.g_bg)
+        
+        self.st = 'NO_HAND'
+        self.smooth_dist = float('inf')
+        self.fps_val = 0
+        self.frames = 0
+        self.t0 = time.time()
+        self.blink = 0
+        self.danger_show = True
+        self.bars_on = False
+        
+        # calib stuff
+        self.calibrating = False
+        self.calib_t = 0
+        self.box = (
+            (w - c.box_size) // 2,
+            (h - c.box_size) // 2,
+            c.box_size,
+            c.box_size
         )
         
-        # State variables
-        self.current_state = 'NO_HAND'
-        self.smoothed_distance = float('inf')
-        self.fps = 0
-        self.frame_count = 0
-        self.start_time = time.time()
-        self.blink_counter = 0
-        self.show_danger = True
-        self.trackbars_created = False
-        
-        # Auto-Calibration State
-        self.is_calibrating = False
-        self.calib_start_time = 0
-        self.calib_box = (
-            (frame_width - config.CALIB_BOX_SIZE) // 2,
-            (frame_height - config.CALIB_BOX_SIZE) // 2,
-            config.CALIB_BOX_SIZE,
-            config.CALIB_BOX_SIZE
-        )
-        
-        print("\nControls:")
-        print("  q = Quit")
-        print("  a = Auto-Calibrate Skin Color (Hold hand in box)")
-        print("  t = Toggle manual HSV trackbars")
-        print("  d = Toggle debug info")
+        print("controls: q=quit, a=calibrate, t=trackbars, d=debug")
     
-    def read_frame(self):
-        return self.camera.read()
+    def get_frame(self):
+        if c.threaded:
+            return self.cap.get()
+        return self.cap.read()
     
-    def compute_state(self, distance_px):
-        if distance_px == float('inf'): return 'NO_HAND'
-        abs_dist = abs(distance_px)
-        if abs_dist <= config.DANGER_PX: return 'DANGER'
-        elif abs_dist <= config.WARNING_PX: return 'WARNING'
+    def get_state(self, d):
+        if d == float('inf'): return 'NO_HAND'
+        d = abs(d)
+        if d <= c.danger: return 'DANGER'
+        if d <= c.warn: return 'WARNING'
         return 'SAFE'
     
-    def draw_virtual_object(self, frame, state):
-        color = get_state_color(state)
-        center = self.object_shape['center']
-        radius = self.object_shape['radius']
-        overlay = frame.copy()
-        cv2.circle(overlay, center, radius, color, -1)
-        cv2.addWeighted(overlay, 0.25, frame, 0.75, 0, frame)
-        cv2.circle(frame, center, radius, color, 6)
-        cv2.circle(frame, center, 10, color, -1)
-    
-    def draw_hand_features(self, frame, features):
-        if features['contour'] is None: return
-        cv2.drawContours(frame, [features['contour']], -1, (0, 165, 255), 3)
-        if features['hull'] is not None: cv2.drawContours(frame, [features['hull']], -1, (0, 255, 100), 2)
-        if features['centroid']: cv2.circle(frame, features['centroid'], 10, (0, 255, 255), -1)
-        if features['closest_point']:
-            cv2.circle(frame, features['closest_point'], 15, (0, 0, 255), -1)
-            cv2.line(frame, features['closest_point'], self.object_shape['center'], (0, 255, 255), 5)
-        for tip in features['fingertips']:
-            cv2.circle(frame, tip, 12, (255, 0, 255), -1)
-    
-    def draw_ui_overlays(self, frame, state, distance_px):
-        state_color = get_state_color(state)
-        cv2.rectangle(frame, (5, 5), (320, 100), (0, 0, 0), -1)
-        cv2.rectangle(frame, (5, 5), (320, 100), state_color, 5)
-        cv2.putText(frame, f"STATE: {state}", (15, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.5, state_color, 4)
-        if distance_px != float('inf'):
-            cv2.putText(frame, f"Dist: {abs(distance_px):.0f}px", (15, 140), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
-        draw_fps(frame, self.fps)
+    def draw_obj(self, img, st):
+        col = u.get_col(st)
+        cx, cy = self.obj['center']
+        r = self.obj['r']
         
-        if state == 'DANGER':
-            self.blink_counter += 1
-            threshold = max(1, int(self.fps / config.BLINK_FPS))
-            if self.blink_counter >= threshold:
-                self.show_danger = not self.show_danger
-                self.blink_counter = 0
-            if self.show_danger: draw_text_center(frame, "DANGER DANGER", 2.0, 5, (0, 0, 255))
+        # draw circle
+        over = img.copy()
+        cv2.circle(over, (cx, cy), r, col, -1)
+        cv2.addWeighted(over, 0.25, img, 0.75, 0, img)
+        cv2.circle(img, (cx, cy), r, col, 6)
+        cv2.circle(img, (cx, cy), 10, col, -1)
+    
+    def draw_hand(self, img, data):
+        if data['cnt'] is None: return
+        cv2.drawContours(img, [data['cnt']], -1, (0, 165, 255), 3)
+        if data['hull'] is not None: cv2.drawContours(img, [data['hull']], -1, (0, 255, 100), 2)
+        if data['center']: cv2.circle(img, data['center'], 10, (0, 255, 255), -1)
+        
+        if data['pt']:
+            cv2.circle(img, data['pt'], 15, (0, 0, 255), -1)
+            cv2.line(img, data['pt'], self.obj['center'], (0, 255, 255), 5)
+            
+        for tip in data['tips']:
+            cv2.circle(img, tip, 12, (255, 0, 255), -1)
+    
+    def draw_gui(self, img, st, d):
+        col = u.get_col(st)
+        cv2.rectangle(img, (5, 5), (320, 100), (0, 0, 0), -1)
+        cv2.rectangle(img, (5, 5), (320, 100), col, 5)
+        cv2.putText(img, f"STATE: {st}", (15, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.5, col, 4)
+        
+        if d != float('inf'):
+            cv2.putText(img, f"Dist: {abs(d):.0f}px", (15, 140), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
+        
+        u.fps(img, self.fps_val)
+        
+        if st == 'DANGER':
+            self.blink += 1
+            if self.blink >= max(1, int(self.fps_val / c.blink_rate)):
+                self.danger_show = not self.danger_show
+                self.blink = 0
+            if self.danger_show: u.text(img, "DANGER DANGER", 2.0, 5, (0, 0, 255))
 
-    def run_auto_calibration(self, frame):
-        """Handle the calibration countdown and logic."""
-        elapsed = time.time() - self.calib_start_time
-        remaining = config.CALIB_DURATION - elapsed
+    def do_calib(self, img):
+        dt = time.time() - self.calib_t
+        rem = c.calib_time - dt
+        x, y, w, h = self.box
         
-        x, y, w, h = self.calib_box
-        
-        if remaining > 0:
-            # Draw box and countdown
-            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 255), 3)
-            draw_text_center(frame, f"Hold Hand in Box: {remaining:.1f}s", 1.0, 2, (0, 255, 255))
+        if rem > 0:
+            cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 255), 3)
+            u.text(img, f"Hold Hand: {rem:.1f}s", 1.0, 2, (0, 255, 255))
         else:
-            # Time up: Calibrate
-            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), -1) # Flash green
-            result_str = self.detector.auto_calibrate(frame, self.calib_box)
-            print(f"✓ Calibration Complete: {result_str}")
-            self.is_calibrating = False
+            cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), -1)
+            res = self.d.calibrate(img, self.box)
+            print(f"done: {res}")
+            self.calibrating = False
 
     def run(self):
         try:
             while True:
-                ret, frame = self.read_frame()
-                if not ret or frame is None: break
+                ret, img = self.get_frame()
+                if not ret or img is None: break
                 
-                # Check for Auto-Calibration Mode
-                if self.is_calibrating:
-                    # Draw instructions and handle timer
-                    self.run_auto_calibration(frame)
-                    
-                    # Show raw frame during calibration (no tracking)
-                    cv2.imshow("Camera", frame)
-                    key = cv2.waitKey(1) & 0xFF
-                    if key == ord('q'): break
+                if self.calibrating:
+                    self.do_calib(img)
+                    cv2.imshow("Cam", img)
+                    if cv2.waitKey(1) & 0xFF == ord('q'): break
                     continue
 
-                # Normal Tracking Mode
-                features = self.detector.get_features(frame, self.object_shape)
+                # process
+                data = self.d.get_data(img, self.obj)
                 
-                # Smoothing
-                raw_dist = features['distance_px']
-                if raw_dist != float('inf'):
-                    alpha = config.DISTANCE_SMOOTHING
-                    self.smoothed_distance = raw_dist if self.smoothed_distance == float('inf') else (alpha * self.smoothed_distance) + ((1 - alpha) * raw_dist)
-                else: self.smoothed_distance = float('inf')
+                # smooth
+                raw = data['dist']
+                if raw != float('inf'):
+                    a = c.smooth
+                    if self.smooth_dist == float('inf'):
+                        self.smooth_dist = raw
+                    else:
+                        self.smooth_dist = (a * self.smooth_dist) + ((1 - a) * raw)
+                else:
+                    self.smooth_dist = float('inf')
                 
-                # Update Graph
-                if config.SHOW_GRAPH:
-                    self.graph.update(abs(self.smoothed_distance) if self.smoothed_distance != float('inf') else float('inf'))
-                    self.graph.draw(frame)
+                # graph
+                if c.show_graph:
+                    val = abs(self.smooth_dist) if self.smooth_dist != float('inf') else float('inf')
+                    self.g.add(val)
+                    self.g.draw(img)
 
-                # State & Draw
-                self.current_state = self.compute_state(self.smoothed_distance)
-                self.draw_virtual_object(frame, self.current_state)
-                self.draw_hand_features(frame, features)
-                self.draw_ui_overlays(frame, self.current_state, self.smoothed_distance)
+                # drawing
+                self.st = self.get_state(self.smooth_dist)
+                self.draw_obj(img, self.st)
+                self.draw_hand(img, data)
+                self.draw_gui(img, self.st, self.smooth_dist)
                 
-                if config.SHOW_DEBUG_INFO:
-                    cv2.putText(frame, f"Low: {self.detector.hsv_lower}", (10, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200,200,200), 1)
+                if c.debug:
+                    cv2.putText(img, str(self.d.lower), (10, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200,200,200), 1)
 
-                cv2.imshow("Camera", frame)
+                cv2.imshow("Cam", img)
                 
-                # Mask Window
-                if self.trackbars_created or config.SHOW_DEBUG_INFO:
-                    if features['mask'] is not None:
-                         mask_display = cv2.cvtColor(features['mask'], cv2.COLOR_GRAY2BGR)
-                         if config.ENABLE_FACE_DETECTION and config.REMOVE_FACE_REGION:
-                             cv2.line(mask_display, (0, config.FACE_REGION_HEIGHT), (mask_display.shape[1], config.FACE_REGION_HEIGHT), (0,0,255), 2)
-                         cv2.imshow("Mask", mask_display)
+                if self.bars_on or c.debug:
+                    if data['mask'] is not None:
+                         m_col = cv2.cvtColor(data['mask'], cv2.COLOR_GRAY2BGR)
+                         cv2.imshow("Mask", m_col)
 
-                # Input Handling
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'): break
-                elif key == ord('a'):
-                    self.is_calibrating = True
-                    self.calib_start_time = time.time()
-                elif key == ord('t'):
-                    if not self.trackbars_created:
+                k = cv2.waitKey(1) & 0xFF
+                if k == ord('q'): break
+                if k == ord('a'):
+                    self.calibrating = True
+                    self.calib_t = time.time()
+                if k == ord('t'):
+                    if not self.bars_on:
                         cv2.namedWindow('Mask')
-                        self.detector.create_trackbars('Mask')
-                        self.trackbars_created = True
-                elif key == ord('d'): config.SHOW_DEBUG_INFO = not config.SHOW_DEBUG_INFO
+                        self.d.sliders('Mask')
+                        self.bars_on = True
+                if k == ord('d'): c.debug = not c.debug
 
-                # FPS
-                self.frame_count += 1
-                if time.time() - self.start_time > 1.0:
-                    self.fps = self.frame_count / (time.time() - self.start_time)
-                    self.frame_count = 0
-                    self.start_time = time.time()
+                # fps
+                self.frames += 1
+                if time.time() - self.t0 > 1.0:
+                    self.fps_val = self.frames / (time.time() - self.t0)
+                    self.frames = 0
+                    self.t0 = time.time()
                     
-        except KeyboardInterrupt: print("Stopped by user")
-        finally: self.cleanup()
-
-    def cleanup(self):
-        if hasattr(self, 'camera'): self.camera.stop()
-        cv2.destroyAllWindows()
+        except KeyboardInterrupt:
+            print("stopped")
+        finally:
+            self.cap.close() if hasattr(self.cap, 'close') else self.cap.release()
+            cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    app = HandTrackingApp()
+    app = App()
     app.run()
