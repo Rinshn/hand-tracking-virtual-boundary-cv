@@ -1,5 +1,3 @@
-# config file
-
 # webcam stuff change it to false for regular webcam
 use_ip = True
 url = "http://10.45.83.111:8080/video"  # e.g., "http://
